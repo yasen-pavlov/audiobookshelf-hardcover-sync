@@ -410,7 +410,7 @@ func (s *Service) findOrCreateUserBookID(ctx context.Context, editionID, status 
 		"book_id": bookID,
 	})
 	
-	existingUserBookID, err := s.findExistingUserBookForBook(ctx, bookID)
+	existingUserBookID, existingEditionID, err := s.findExistingUserBookForBook(ctx, bookID)
 	if err != nil {
 		logCtx.Warn("Failed to check for existing user book by book ID", map[string]interface{}{
 			"error":   err.Error(),
@@ -418,12 +418,48 @@ func (s *Service) findOrCreateUserBookID(ctx context.Context, editionID, status 
 		})
 		// Continue to edition-specific check if book-only check fails
 	} else if existingUserBookID > 0 {
-		// Found an existing user book for this book (possibly different edition)
-		logCtx.Info("Found existing user book for same book, using it", map[string]interface{}{
-			"book_id":               bookID,
-			"existing_user_book_id": existingUserBookID,
-			"requested_edition_id":  editionID,
-		})
+		// Found an existing user_book for this book. CRITICAL: previously
+		// we returned this user_book unconditionally, which caused progress
+		// to land on whatever edition the user_book was already on (often a
+		// print edition imported from Goodreads / etc.). When the
+		// requested edition differs from the existing one, relink the
+		// user_book to the requested (typically audio) edition before
+		// returning so subsequent reads write progress to the right place.
+		if existingEditionID != editionIDInt {
+			logCtx.Info("Existing user_book is on a different edition — relinking to requested edition", map[string]interface{}{
+				"book_id":             bookID,
+				"existing_user_book":  existingUserBookID,
+				"existing_edition_id": existingEditionID,
+				"requested_edition_id": editionIDInt,
+			})
+			if !s.config.Sync.DryRun {
+				newEditionID := editionIDInt
+				updateErr := s.hardcover.UpdateUserBook(ctx, hardcover.UpdateUserBookInput{
+					ID:        existingUserBookID,
+					EditionID: &newEditionID,
+				})
+				if updateErr != nil {
+					logCtx.Warn("Failed to relink user_book to requested edition; continuing with existing edition", map[string]interface{}{
+						"error":               updateErr.Error(),
+						"existing_user_book":  existingUserBookID,
+						"requested_edition_id": editionIDInt,
+					})
+				} else {
+					logCtx.Info("Relinked user_book to requested edition", map[string]interface{}{
+						"existing_user_book":  existingUserBookID,
+						"requested_edition_id": editionIDInt,
+					})
+				}
+			} else {
+				logCtx.Info("[DRY-RUN] Would relink user_book to requested edition", nil)
+			}
+		} else {
+			logCtx.Info("Found existing user book for same book on requested edition, using it", map[string]interface{}{
+				"book_id":              bookID,
+				"existing_user_book_id": existingUserBookID,
+				"edition_id":           editionID,
+			})
+		}
 		return existingUserBookID, nil
 	}
 	
@@ -534,30 +570,27 @@ func (s *Service) findOrCreateUserBookID(ctx context.Context, editionID, status 
 	return userBookID64, nil
 }
 
-// findExistingUserBookForBook checks if there's already a user book for this book (any edition)
-func (s *Service) findExistingUserBookForBook(ctx context.Context, bookID int64) (int64, error) {
-	// Use the existing GetUserBookID method with edition 0 to check if any user book exists
-	// This is a workaround since we don't have a direct lookup by book ID only
-	// We'll iterate through known editions or use a different approach
-	
-	// For now, let's use the Hardcover client's internal method directly
-	// by type asserting to the concrete type
+// findExistingUserBookForBook checks if there's already a user_book for this
+// book (any edition). Returns (userBookID, existingEditionID, error). The
+// existing edition_id is needed by findOrCreateUserBookID so it can detect
+// whether the user_book is glued to the wrong edition (e.g. print) and relink
+// it to the requested audio edition before progress gets written.
+func (s *Service) findExistingUserBookForBook(ctx context.Context, bookID int64) (int64, int64, error) {
 	if hcClient, ok := s.hardcover.(*hardcover.Client); ok {
 		userID, err := hcClient.GetCurrentUserID(ctx)
 		if err != nil {
-			return 0, fmt.Errorf("failed to get current user ID: %w", err)
+			return 0, 0, fmt.Errorf("failed to get current user ID: %w", err)
 		}
-		
-		userBookID, err := hcClient.LookupUserBookByBookIDOnly(ctx, int(bookID), int(userID))
+
+		userBookID, existingEditionID, err := hcClient.LookupUserBookForBookWithEdition(ctx, int(bookID), int(userID))
 		if err != nil {
-			return 0, fmt.Errorf("failed to lookup user book by book ID: %w", err)
+			return 0, 0, fmt.Errorf("failed to lookup user book by book ID: %w", err)
 		}
-		
-		return int64(userBookID), nil
+		return int64(userBookID), int64(existingEditionID), nil
 	}
-	
+
 	// Fallback: return 0 (no existing user book)
-	return 0, nil
+	return 0, 0, nil
 }
 
 // Sync performs a full synchronization between Audiobookshelf and Hardcover
@@ -3867,6 +3900,27 @@ func (s *Service) findBookInHardcoverByTitleAuthor(ctx context.Context, book mod
 			log.Debug("GetBookByID enrichment failed (continuing with search data)", map[string]interface{}{
 				"error": err.Error(),
 			})
+		}
+	}
+
+	// Title/author search returns whatever default edition Hardcover assigns
+	// to the book — usually the print edition. For audio sync, prefer the
+	// matching audio edition of the same book so progress is tracked on the
+	// right edition. If no audio edition exists, fall through with whatever
+	// the search returned (caller treats this path as a mismatch anyway).
+	if bestMatch != nil && bestMatch.ID != "" {
+		audioEdition, audioErr := s.hardcover.GetAudioEditionForBook(ctx, bestMatch.ID)
+		if audioErr == nil && audioEdition != nil {
+			log.Info("Upgraded title/author match to audio edition", map[string]interface{}{
+				"book_id":             bestMatch.ID,
+				"previous_edition_id": bestMatch.EditionID,
+				"audio_edition_id":    audioEdition.ID,
+				"audio_edition_asin":  audioEdition.ASIN,
+			})
+			bestMatch.EditionID = audioEdition.ID
+			bestMatch.EditionASIN = audioEdition.ASIN
+			bestMatch.EditionISBN10 = audioEdition.ISBN10
+			bestMatch.EditionISBN13 = audioEdition.ISBN13
 		}
 	}
 
