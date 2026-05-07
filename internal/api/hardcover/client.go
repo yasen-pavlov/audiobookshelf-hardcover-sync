@@ -3782,24 +3782,24 @@ func (c *Client) UpdateUserBook(ctx context.Context, input UpdateUserBookInput) 
 		"edition_id": input.EditionID,
 	})
 
-	// Define the GraphQL mutation
+	// Hardcover exposes a custom `update_user_book(id: Int!, object: UserBookUpdateInput!)`
+	// mutation rather than the auto-generated Hasura `_by_pk` form. Same pattern
+	// as UpdateUserBookStatus a few hundred lines above. Returns
+	// `UserBookIdType { id, error }`.
 	const mutation = `
 		mutation UpdateUserBook($id: Int!, $editionId: Int) {
-			update_user_book_by_pk(
-				pk_columns: {id: $id},
-				_set: {edition_id: $editionId}
-			) {
+			update_user_book(id: $id, object: {edition_id: $editionId}) {
 				id
-				edition_id
+				error
 			}
 		}`
 
 	// Execute the mutation
 	var result struct {
-		UpdateUserBookByPk *struct {
-			ID        int  `json:"id"`
-			EditionID *int `json:"edition_id"`
-		} `json:"update_user_book_by_pk"`
+		UpdateUserBook *struct {
+			ID    int     `json:"id"`
+			Error *string `json:"error"`
+		} `json:"update_user_book"`
 	}
 
 	var editionID *graphql.Int
@@ -3821,14 +3821,19 @@ func (c *Client) UpdateUserBook(ctx context.Context, input UpdateUserBookInput) 
 		return fmt.Errorf("failed to update user book: %w", err)
 	}
 
-	if result.UpdateUserBookByPk == nil {
+	if result.UpdateUserBook == nil {
 		log.Warn("User book not found or not updated", map[string]interface{}{})
 		return ErrUserBookNotFound
 	}
+	if result.UpdateUserBook.Error != nil {
+		log.Error("Hardcover returned an error from update_user_book", map[string]interface{}{
+			"error": *result.UpdateUserBook.Error,
+		})
+		return fmt.Errorf("update_user_book error: %s", *result.UpdateUserBook.Error)
+	}
 
 	log.Info("Successfully updated user book", map[string]interface{}{
-		"id":         result.UpdateUserBookByPk.ID,
-		"edition_id": result.UpdateUserBookByPk.EditionID,
+		"id": result.UpdateUserBook.ID,
 	})
 
 	return nil
