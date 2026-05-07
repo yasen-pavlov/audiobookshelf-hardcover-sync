@@ -2417,6 +2417,153 @@ func (c *Client) GetEdition(ctx context.Context, editionID string) (*models.Edit
 	return editionModel, nil
 }
 
+// GetAudioEditionForBook returns the audiobook edition (reading_format_id=2) for a
+// given book ID, preferring the one with the most users_count when multiple exist.
+// Returns (nil, nil) if the book has no audio edition. Used by the title/author
+// fallback path so a book found by name doesn't get glued to its print edition.
+func (c *Client) GetAudioEditionForBook(ctx context.Context, bookID string) (*models.Edition, error) {
+	log := logger.WithContext(map[string]interface{}{
+		"book_id": bookID,
+		"method":  "GetAudioEditionForBook",
+	})
+
+	bookIDInt, err := strconv.Atoi(bookID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid book ID: %s", bookID)
+	}
+
+	const query = `
+		query AudioEditionForBook($bookId: Int!) {
+			editions(
+				where: {
+					book_id: {_eq: $bookId},
+					reading_format_id: {_eq: 2}
+				},
+				order_by: {users_count: desc_nulls_last},
+				limit: 1
+			) {
+				id
+				book_id
+				title
+				isbn_10
+				isbn_13
+				asin
+				release_date
+				reading_format_id
+				audio_seconds
+			}
+		}`
+
+	var response struct {
+		Editions []struct {
+			ID              int     `json:"id"`
+			BookID          int     `json:"book_id"`
+			Title           *string `json:"title"`
+			ISBN10          *string `json:"isbn_10"`
+			ISBN13          *string `json:"isbn_13"`
+			ASIN            *string `json:"asin"`
+			ReleaseDate     *string `json:"release_date"`
+			ReadingFormatID *int    `json:"reading_format_id"`
+			AudioSeconds    *int    `json:"audio_seconds"`
+		} `json:"editions"`
+	}
+
+	err = c.GraphQLQuery(ctx, query, map[string]interface{}{
+		"bookId": bookIDInt,
+	}, &response)
+	if err != nil {
+		log.Error("Failed to query audio edition for book", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to get audio edition for book %s: %w", bookID, err)
+	}
+
+	if len(response.Editions) == 0 {
+		log.Debug("No audio edition found for book", nil)
+		return nil, nil
+	}
+
+	e := response.Editions[0]
+	editionModel := &models.Edition{
+		ID:     strconv.Itoa(e.ID),
+		BookID: strconv.Itoa(e.BookID),
+	}
+	if e.Title != nil {
+		editionModel.Title = *e.Title
+	}
+	if e.ISBN10 != nil {
+		editionModel.ISBN10 = *e.ISBN10
+	}
+	if e.ISBN13 != nil {
+		editionModel.ISBN13 = *e.ISBN13
+	}
+	if e.ASIN != nil {
+		editionModel.ASIN = *e.ASIN
+	}
+	if e.ReleaseDate != nil {
+		editionModel.ReleaseDate = *e.ReleaseDate
+	}
+	if e.ReadingFormatID != nil {
+		editionModel.ReadingFormatID = strconv.Itoa(*e.ReadingFormatID)
+	}
+	// note: audio_seconds is fetched (selected in the GraphQL query) so
+	// future code can use it, but models.Edition has no field for it today,
+	// so we drop it on the floor. Add an AudioSeconds field on Edition if
+	// you need to surface it.
+
+	log.Debug("Found audio edition for book", map[string]interface{}{
+		"edition_id": editionModel.ID,
+		"asin":       editionModel.ASIN,
+	})
+	return editionModel, nil
+}
+
+// LookupUserBookForBookWithEdition is identical in payload to LookupUserBookByBookIDOnly
+// but also returns the existing edition_id of that user_book. Used by the
+// findOrCreateUserBookID relink path so we can detect when an existing
+// user_book is on a different (e.g. print) edition than the audio one we
+// want to write progress to, and switch via UpdateUserBook.
+func (c *Client) LookupUserBookForBookWithEdition(ctx context.Context, bookID, userID int) (userBookID, existingEditionID int, err error) {
+	if c.logger == nil {
+		c.logger = logger.Get()
+	}
+	log := c.logger.With(map[string]interface{}{
+		"bookID": bookID,
+		"userID": userID,
+		"method": "LookupUserBookForBookWithEdition",
+	})
+
+	const query = `
+	query GetUserBookByBookOnly($bookId: Int!, $userId: Int!) {
+	  user_books(
+		where: { book_id: {_eq: $bookId}, user_id: {_eq: $userId} },
+		limit: 1
+	  ) { id book_id edition_id }
+	}`
+
+	var response struct {
+		UserBooks []struct {
+			ID        int `json:"id"`
+			BookID    int `json:"book_id"`
+			EditionID int `json:"edition_id"`
+		} `json:"user_books"`
+	}
+
+	if err = c.GraphQLQuery(ctx, query, map[string]interface{}{
+		"bookId": bookID,
+		"userId": userID,
+	}, &response); err != nil {
+		log.Error("Failed to query user book by book ID", map[string]interface{}{"error": err.Error()})
+		return 0, 0, fmt.Errorf("failed to query user book by book ID: %w", err)
+	}
+
+	if len(response.UserBooks) == 0 {
+		return 0, 0, nil
+	}
+	ub := response.UserBooks[0]
+	return ub.ID, ub.EditionID, nil
+}
+
 // SearchPeople searches for people (authors or narrators) by name or ID
 // Implements the HardcoverClient interface
 func (c *Client) SearchPeople(ctx context.Context, name, personType string, limit int) ([]models.Author, error) {
