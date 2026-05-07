@@ -159,6 +159,21 @@ func (m *MockHardcoverClient) GetEdition(ctx context.Context, editionID string) 
 	return args.Get(0).(*models.Edition), args.Error(1)
 }
 
+// GetAudioEditionForBook mocks the GetAudioEditionForBook method.
+func (m *MockHardcoverClient) GetAudioEditionForBook(ctx context.Context, bookID string) (*models.Edition, error) {
+	args := m.Called(ctx, bookID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*models.Edition), args.Error(1)
+}
+
+// UpdateUserBook mocks the UpdateUserBook method.
+func (m *MockHardcoverClient) UpdateUserBook(ctx context.Context, input hardcover.UpdateUserBookInput) error {
+	args := m.Called(ctx, input)
+	return args.Error(0)
+}
+
 // CheckBookOwnership mocks the CheckBookOwnership method
 func (m *MockHardcoverClient) CheckBookOwnership(ctx context.Context, editionID int) (bool, error) {
 	args := m.Called(ctx, editionID)

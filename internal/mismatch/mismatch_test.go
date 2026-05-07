@@ -126,6 +126,14 @@ func (m *MockHardcoverClient) GetEdition(ctx context.Context, id string) (*model
 	return nil, nil
 }
 
+func (m *MockHardcoverClient) GetAudioEditionForBook(ctx context.Context, bookID string) (*models.Edition, error) {
+	return nil, nil
+}
+
+func (m *MockHardcoverClient) UpdateUserBook(ctx context.Context, input hardcover.UpdateUserBookInput) error {
+	return nil
+}
+
 func (m *MockHardcoverClient) GetUserBookID(ctx context.Context, editionID int) (int, error) {
 	return 0, nil
 }

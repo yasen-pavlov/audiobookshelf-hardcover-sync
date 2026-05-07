@@ -252,6 +252,12 @@ func TestFindBookInHardcoverByTitleAuthor(t *testing.T) {
 				first := tt.searchResults[0]
 				mockClient.On("GetBookByID", mock.Anything, first.ID).
 					Return(&models.HardcoverBook{ID: first.ID, Title: first.Title}, nil)
+				// Service now also calls GetAudioEditionForBook to upgrade
+				// the title/author match to the audio edition where one
+				// exists. Default to "no audio edition" so existing test
+				// cases keep their original bestMatch.EditionID.
+				mockClient.On("GetAudioEditionForBook", mock.Anything, first.ID).
+					Return((*models.Edition)(nil), nil)
 			}
 
 			// We no longer call GetEdition with book ID in the new implementation

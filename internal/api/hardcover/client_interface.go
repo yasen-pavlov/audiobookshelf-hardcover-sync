@@ -23,6 +23,12 @@ type HardcoverClientInterface interface {
 	// GetEdition retrieves an edition by ID
 	GetEdition(ctx context.Context, editionID string) (*models.Edition, error)
 
+	// GetAudioEditionForBook returns the audiobook edition (reading_format_id=2)
+	// for a given book ID, preferring the highest-users_count one. Returns
+	// (nil, nil) when no audio edition exists. Used by the title/author
+	// fallback so a book found by name doesn't get linked to its print edition.
+	GetAudioEditionForBook(ctx context.Context, bookID string) (*models.Edition, error)
+
 	// CheckBookOwnership checks if a book is in the user's "Owned" list
 	CheckBookOwnership(ctx context.Context, editionID int) (bool, error)
 
@@ -86,6 +92,11 @@ type HardcoverClientInterface interface {
 
 	// CreateUserBook creates a new user book entry
 	CreateUserBook(ctx context.Context, editionID, status string) (string, error)
+
+	// UpdateUserBook updates an existing user_book — primarily used to switch
+	// edition_id (e.g. relinking a user_book from a print edition to the
+	// matching audio edition).
+	UpdateUserBook(ctx context.Context, input UpdateUserBookInput) error
 
     // GetBookByID retrieves a book and basic related details by its Hardcover book ID
     GetBookByID(ctx context.Context, bookID string) (*models.HardcoverBook, error)
