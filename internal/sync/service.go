@@ -448,9 +448,52 @@ func (s *Service) findOrCreateUserBookID(ctx context.Context, editionID, status 
 						"existing_user_book":  existingUserBookID,
 						"requested_edition_id": editionIDInt,
 					})
+					// Re-align existing user_book_reads to the new edition.
+					// Without this they keep their old edition_id (often the
+					// print edition's id, or null), leaving the user_book and
+					// its reads on different editions — which surfaces in the
+					// Hardcover UI as orphaned reads attached to the wrong
+					// edition. Best-effort: log and continue on errors so a
+					// transient API failure doesn't break the rest of sync.
+					reads, readsErr := s.hardcover.GetUserBookReads(ctx, hardcover.GetUserBookReadsInput{
+						UserBookID: existingUserBookID,
+					})
+					if readsErr != nil {
+						logCtx.Warn("Could not list user_book_reads to re-align edition_id; continuing", map[string]interface{}{
+							"error":              readsErr.Error(),
+							"existing_user_book": existingUserBookID,
+						})
+					} else {
+						aligned := 0
+						for _, r := range reads {
+							if r.EditionID != nil && *r.EditionID == editionIDInt {
+								continue
+							}
+							if _, uerr := s.hardcover.UpdateUserBookRead(ctx, hardcover.UpdateUserBookReadInput{
+								ID: r.ID,
+								Object: map[string]interface{}{
+									"edition_id": editionIDInt,
+								},
+							}); uerr != nil {
+								logCtx.Warn("Failed to re-align user_book_read edition_id; continuing", map[string]interface{}{
+									"error":   uerr.Error(),
+									"read_id": r.ID,
+								})
+								continue
+							}
+							aligned++
+						}
+						if aligned > 0 {
+							logCtx.Info("Re-aligned user_book_reads to requested edition", map[string]interface{}{
+								"existing_user_book":   existingUserBookID,
+								"reads_realigned":      aligned,
+								"requested_edition_id": editionIDInt,
+							})
+						}
+					}
 				}
 			} else {
-				logCtx.Info("[DRY-RUN] Would relink user_book to requested edition", nil)
+				logCtx.Info("[DRY-RUN] Would relink user_book + re-align reads to requested edition", nil)
 			}
 		} else {
 			logCtx.Info("Found existing user book for same book on requested edition, using it", map[string]interface{}{
