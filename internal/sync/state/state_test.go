@@ -252,3 +252,99 @@ func TestCustomStatePathAndPermissions(t *testing.T) {
 		})
 	}
 }
+
+// TestNeedsSync covers the per-book change detection used by the
+// incremental-sync filter in service.processBook.
+//
+// The transition cases below previously caused a silent skip when the
+// caller passed pre-enrichment values (currentProgress=0,
+// currentStatus="WANT_TO_READ") for a book whose stored state was also
+// WANT_TO_READ-with-zero-progress — the filter saw "no change", returned
+// false, and the book was never synced even when Audiobookshelf had
+// real progress for it. processBook now enriches book.Progress from
+// /api/me before calling NeedsSync; this test pins the contract from
+// the state-side so the early-skip filter keeps working correctly.
+func TestNeedsSync(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bookID    = "book-1"
+		threshold = 0.001
+	)
+
+	type call struct {
+		name           string
+		storedProgress float64
+		storedStatus   string
+		curProgress    float64
+		curStatus      string
+		wantSync       bool
+	}
+
+	tests := []call{
+		{
+			name:           "no stored state — new book always syncs",
+			storedProgress: 0,
+			storedStatus:   "",
+			curProgress:    0,
+			curStatus:      "WANT_TO_READ",
+			wantSync:       true,
+		},
+		{
+			name:           "WANT_TO_READ → IN_PROGRESS (post-enrichment)",
+			storedProgress: 0,
+			storedStatus:   "WANT_TO_READ",
+			curProgress:    0.18,
+			curStatus:      "IN_PROGRESS",
+			wantSync:       true,
+		},
+		{
+			name:           "WANT_TO_READ stable (matches pre-enrichment shape — must NOT trigger)",
+			storedProgress: 0,
+			storedStatus:   "WANT_TO_READ",
+			curProgress:    0,
+			curStatus:      "WANT_TO_READ",
+			wantSync:       false,
+		},
+		{
+			name:           "IN_PROGRESS — small progress delta below threshold",
+			storedProgress: 0.50,
+			storedStatus:   "IN_PROGRESS",
+			curProgress:    0.5005,
+			curStatus:      "IN_PROGRESS",
+			wantSync:       false,
+		},
+		{
+			name:           "IN_PROGRESS — progress delta above threshold",
+			storedProgress: 0.50,
+			storedStatus:   "IN_PROGRESS",
+			curProgress:    0.55,
+			curStatus:      "IN_PROGRESS",
+			wantSync:       true,
+		},
+		{
+			name:           "IN_PROGRESS → FINISHED",
+			storedProgress: 0.95,
+			storedStatus:   "IN_PROGRESS",
+			curProgress:    1.0,
+			curStatus:      "FINISHED",
+			wantSync:       true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := NewState()
+			if tc.storedStatus != "" {
+				s.UpdateBookWithUserBookID(bookID, tc.storedProgress, tc.storedStatus, "")
+			}
+
+			got := s.NeedsSync(bookID, tc.curProgress, tc.curStatus, threshold)
+			assert.Equal(t, tc.wantSync, got,
+				"NeedsSync(stored=%s/%v → current=%s/%v) want=%v got=%v",
+				tc.storedStatus, tc.storedProgress, tc.curStatus, tc.curProgress, tc.wantSync, got)
+		})
+	}
+}
