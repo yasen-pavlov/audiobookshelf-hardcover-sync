@@ -3202,8 +3202,16 @@ func (s *Service) handleInProgressBook(ctx context.Context, userBookID int64, bo
 			log.Info(fmt.Sprintf("Updating existing read status - progress difference (%s) >= min threshold (%.2f)", pDiff, mDiff), logCtx)
 		}
 
-		// EditionID removed from update to prevent edition switching
-		// The read is already linked to the user book, we shouldn't change its edition
+		// EditionID is normally omitted on update to prevent edition switching.
+		// But if the existing row has no edition_id at all (orphaned read created
+		// by an older sync version or server-side auto-creation), backfill it
+		// from the user_book's edition. Hardcover's "all books" view derives its
+		// per-book percentage from the read row's edition link; a null there
+		// shows 0% even though progress_seconds is populated.
+		if readStatusToUpdate.EditionID == nil && userBookEditionID != nil {
+			updateObj["edition_id"] = *userBookEditionID
+			logCtx["backfilled_edition_id"] = *userBookEditionID
+		}
 
 		// Update the read with the current progress
 		updateInput := hardcover.UpdateUserBookReadInput{
