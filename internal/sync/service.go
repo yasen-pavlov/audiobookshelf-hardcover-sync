@@ -470,11 +470,24 @@ func (s *Service) findOrCreateUserBookID(ctx context.Context, editionID, status 
 							if r.EditionID != nil && *r.EditionID == editionIDInt {
 								continue
 							}
+							// update_user_book_read is REPLACE-style: any column not in
+							// the object gets nulled. Preserve all current fields so we
+							// only change edition_id.
+							alignObj := map[string]interface{}{
+								"edition_id": editionIDInt,
+							}
+							if r.StartedAt != nil && *r.StartedAt != "" {
+								alignObj["started_at"] = *r.StartedAt
+							}
+							if r.FinishedAt != nil && *r.FinishedAt != "" {
+								alignObj["finished_at"] = *r.FinishedAt
+							}
+							if r.ProgressSeconds != nil {
+								alignObj["progress_seconds"] = *r.ProgressSeconds
+							}
 							if _, uerr := s.hardcover.UpdateUserBookRead(ctx, hardcover.UpdateUserBookReadInput{
-								ID: r.ID,
-								Object: map[string]interface{}{
-									"edition_id": editionIDInt,
-								},
+								ID:     r.ID,
+								Object: alignObj,
 							}); uerr != nil {
 								logCtx.Warn("Failed to re-align user_book_read edition_id; continuing", map[string]interface{}{
 									"error":   uerr.Error(),
@@ -2239,10 +2252,15 @@ func (s *Service) HandleFinishedBook(ctx context.Context, book models.Audiobooks
 				updateObj["started_at"] = finishedAt
 			}
 
-			// Preserve edition_id if it exists
+			// Always include edition_id (REPLACE-style mutation — see comment in
+			// handleInProgressBook). Prefer the read's existing value; fall
+			// back to the editionID we were called with.
 			if latestUnfinishedRead.EditionID != nil {
-				editionID := *latestUnfinishedRead.EditionID
-				updateObj["edition_id"] = editionID
+				updateObj["edition_id"] = *latestUnfinishedRead.EditionID
+			} else if editionID != "" {
+				if eid, convErr := strconv.ParseInt(editionID, 10, 64); convErr == nil && eid != 0 {
+					updateObj["edition_id"] = eid
+				}
 			}
 
 			// Log the update object for debugging
@@ -2972,8 +2990,13 @@ func (s *Service) handleInProgressBook(ctx context.Context, userBookID int64, bo
 				if readStatusToUpdate.ProgressSeconds != nil {
 					closeObj["progress_seconds"] = *readStatusToUpdate.ProgressSeconds
 				}
-				if readStatusToUpdate.EditionID != nil {
+				// Always include edition_id (REPLACE-style mutation). Prefer the
+				// read's existing value; fall back to the user_book's edition_id.
+				switch {
+				case readStatusToUpdate.EditionID != nil:
 					closeObj["edition_id"] = *readStatusToUpdate.EditionID
+				case userBookEditionID != nil:
+					closeObj["edition_id"] = *userBookEditionID
 				}
 
 				_, closeErr := s.hardcover.UpdateUserBookRead(ctx, hardcover.UpdateUserBookReadInput{
@@ -3202,13 +3225,24 @@ func (s *Service) handleInProgressBook(ctx context.Context, userBookID int64, bo
 			log.Info(fmt.Sprintf("Updating existing read status - progress difference (%s) >= min threshold (%.2f)", pDiff, mDiff), logCtx)
 		}
 
-		// EditionID is normally omitted on update to prevent edition switching.
-		// But if the existing row has no edition_id at all (orphaned read created
-		// by an older sync version or server-side auto-creation), backfill it
-		// from the user_book's edition. Hardcover's "all books" view derives its
-		// per-book percentage from the read row's edition link; a null there
-		// shows 0% even though progress_seconds is populated.
-		if readStatusToUpdate.EditionID == nil && userBookEditionID != nil {
+		// Hardcover's update_user_book_read mutation is REPLACE-style: any
+		// column not included in `object` gets nulled. The pre-existing comment
+		// here said "EditionID removed from update to prevent edition switching"
+		// — that was actively wrong. By omitting edition_id we weren't
+		// "preserving" it, we were destroying it on every single update. The
+		// read's "All books" percentage in Hardcover's UI is computed from this
+		// column, so every in-progress audiobook silently showed 0% Done.
+		//
+		// Always include edition_id. Prefer the read's existing value (avoids
+		// switching editions on Hardcover's side if the user explicitly linked
+		// a read to a different edition). Fall back to the user_book's
+		// edition_id — our relink path keeps the user_book aligned to the
+		// audio edition, so this is the right value for orphaned/null rows.
+		// Only omit if neither is known, in which case nothing's being lost.
+		switch {
+		case readStatusToUpdate.EditionID != nil:
+			updateObj["edition_id"] = *readStatusToUpdate.EditionID
+		case userBookEditionID != nil:
 			updateObj["edition_id"] = *userBookEditionID
 			logCtx["backfilled_edition_id"] = *userBookEditionID
 		}
