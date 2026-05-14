@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"sort"
 	"strconv"
@@ -110,6 +111,21 @@ const (
 	DefaultMaxRetries = 3
 	// DefaultRetryDelay is the default delay between retries
 	DefaultRetryDelay = 500 * time.Millisecond
+	// DefaultMax429Retries is the additional retry budget for HTTP 429 responses.
+	// Hardcover's throttle window is multi-second, so we need a larger ceiling
+	// than what 5xx normally warrants. Granted on top of MaxRetries.
+	DefaultMax429Retries = 5
+	// Throttle429MinBaseDelay is the floor used as the backoff base when we see
+	// a 429 without a Retry-After header (Hardcover returns `{"error":"Throttled"}`
+	// with no header). The actual sleep is this × exponential × jitter, capped
+	// by MaxRetryDelay.
+	Throttle429MinBaseDelay = 5 * time.Second
+	// MaxRetryDelay caps any single inter-attempt sleep to keep one bad book
+	// from stalling the whole sync run.
+	MaxRetryDelay = 60 * time.Second
+	// RetryJitterFraction is the +/- jitter range applied to the computed delay,
+	// expressed as a fraction of the delay. 0.25 ⇒ ±25%.
+	RetryJitterFraction = 0.25
 )
 
 // Default rate limiting configuration
@@ -179,6 +195,8 @@ type Client struct {
 	rateLimiter      *util.RateLimiter
 	maxRetries       int
 	retryDelay       time.Duration
+	// throttleBaseDelay overrides Throttle429MinBaseDelay when set (tests only).
+	throttleBaseDelay     time.Duration
 	userBookIDCache       cache.Cache[int, int]             // editionID -> userBookID
 	userBookByBookIDCache cache.Cache[int, int]             // bookID -> userBookID
 	userCache             cache.Cache[string, any]          // Generic cache for user-specific data
@@ -414,6 +432,46 @@ func isRetryableHTTPStatus(statusCode int) bool {
 	return statusCode == http.StatusTooManyRequests || (statusCode >= 500 && statusCode <= 599)
 }
 
+// isThrottledBody returns true if the response body looks like Hardcover's
+// rate-limit signal (`{"error":"Throttled"}`). Used to pick a longer baseline
+// backoff when no Retry-After header is present.
+func isThrottledBody(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(body)), `"throttled"`)
+}
+
+// computeBackoffDelay returns an exponential-with-jitter delay for retry attempt n
+// (n starts at 1 for the first wait between attempt 0 and attempt 1).
+// Formula: base * 2^(n-1) ± up-to-RetryJitterFraction, capped at MaxRetryDelay.
+// Falls back to base when n < 1.
+func computeBackoffDelay(base time.Duration, n int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	if n < 1 {
+		return base
+	}
+	shift := n - 1
+	if shift > 20 {
+		shift = 20 // guard against pathological overflow on long retry strings
+	}
+	expo := base * (1 << uint(shift))
+	if expo <= 0 || expo > MaxRetryDelay {
+		expo = MaxRetryDelay
+	}
+	jitter := time.Duration((rand.Float64()*2 - 1) * RetryJitterFraction * float64(expo))
+	delay := expo + jitter
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > MaxRetryDelay {
+		delay = MaxRetryDelay
+	}
+	return delay
+}
+
 func parseRetryAfterDelay(value string) (time.Duration, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -477,16 +535,34 @@ func (c *Client) executeGraphQLOperation(ctx context.Context, op graphqlOperatio
 		r.Header.Set("Accept", "application/json")
 	}
 
-	// Execute the operation using the GraphQL client with retry logic
-	var lastErr error
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	// Execute the operation using the GraphQL client with retry logic.
+	//
+	// Retry budget: c.maxRetries general retries + DefaultMax429Retries extra
+	// attempts that only count when we see a 429. A book that gets throttled
+	// once at the start of its lookup keeps full budget for non-429 failures
+	// further down. Per-attempt delay is exponential-with-jitter, with a higher
+	// base when the last failure was a 429 (Hardcover's throttle window is
+	// longer than a 5xx blip).
+	var (
+		lastErr      error
+		seen429s     int
+		maxAttempts  = c.maxRetries + 1
+		nextDelay    time.Duration
+		nextDelaySet bool
+	)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
+			delay := nextDelay
+			if !nextDelaySet {
+				delay = computeBackoffDelay(c.retryDelay, attempt)
+			}
 			// Context-aware backoff delay
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("retry canceled: %w", ctx.Err())
-			case <-time.After(c.retryDelay * time.Duration(attempt)):
+			case <-time.After(delay):
 			}
+			nextDelaySet = false
 		}
 
 		// Apply rate limiting
@@ -574,17 +650,61 @@ func (c *Client) executeGraphQLOperation(ctx context.Context, op graphqlOperatio
 			}
 
 			if resp.StatusCode == http.StatusTooManyRequests {
-				if retryAfter, ok := parseRetryAfterDelay(resp.Header.Get("Retry-After")); ok {
-					genericDelay := c.retryDelay * time.Duration(attempt+1)
-					if retryAfter > genericDelay {
-						extraDelay := retryAfter - genericDelay
-						select {
-						case <-ctx.Done():
-							return fmt.Errorf("retry canceled: %w", ctx.Err())
-						case <-time.After(extraDelay):
-						}
+				seen429s++
+				// Extend the cap so 429s consume their own budget instead of
+				// eating into the generic-retry budget.
+				if seen429s <= DefaultMax429Retries {
+					if cap := c.maxRetries + 1 + seen429s; cap > maxAttempts {
+						maxAttempts = cap
 					}
 				}
+
+				retryAfter, hasRetryAfter := parseRetryAfterDelay(resp.Header.Get("Retry-After"))
+				throttled := isThrottledBody(body)
+
+				// Tell the rate limiter so subsequent Wait()s slow down for the
+				// rest of this sync run, not just this single retry.
+				if hasRetryAfter {
+					c.rateLimiter.OnRateLimit(retryAfter)
+				} else {
+					c.rateLimiter.OnRateLimit(0)
+				}
+
+				// Compute the next inter-attempt delay. Prefer Retry-After when
+				// present (with a small floor to keep the math sane), otherwise
+				// exponential-with-jitter off Throttle429MinBaseDelay when the
+				// response looks like Hardcover's throttle signal, otherwise the
+				// default exponential off c.retryDelay.
+				var nd time.Duration
+				switch {
+				case hasRetryAfter:
+					nd = retryAfter
+					if jittered := computeBackoffDelay(c.retryDelay, attempt+1); jittered > nd {
+						nd = jittered
+					}
+				case throttled:
+					base := Throttle429MinBaseDelay
+					if c.throttleBaseDelay > 0 {
+						base = c.throttleBaseDelay
+					}
+					nd = computeBackoffDelay(base, attempt+1)
+				default:
+					nd = computeBackoffDelay(c.retryDelay, attempt+1)
+				}
+				if nd > MaxRetryDelay {
+					nd = MaxRetryDelay
+				}
+				nextDelay = nd
+				nextDelaySet = true
+
+				c.logger.Warn("Rate-limited (429); will retry after backoff", map[string]interface{}{
+					"attempt":       attempt + 1,
+					"seen_429s":     seen429s,
+					"has_retry_after": hasRetryAfter,
+					"throttled_body":  throttled,
+					"next_delay":      nd.String(),
+					"max_attempts":    maxAttempts,
+				})
 			}
 			continue
 		}
@@ -678,14 +798,16 @@ func (c *Client) executeGraphQLOperation(ctx context.Context, op graphqlOperatio
 	// If we get here, all retry attempts failed
 	if lastErr != nil {
 		c.logger.Error("GraphQL operation failed after all retries", map[string]interface{}{
-			"error":       lastErr.Error(),
-			"operation":   string(op),
-			"query":       query,
-			"variables":   variables,
-			"max_retries": c.maxRetries,
+			"error":        lastErr.Error(),
+			"operation":    string(op),
+			"query":        query,
+			"variables":    variables,
+			"max_retries":  c.maxRetries,
+			"seen_429s":    seen429s,
+			"max_attempts": maxAttempts,
 		})
 	}
-	return fmt.Errorf("failed after %d attempts: %w", c.maxRetries+1, lastErr)
+	return fmt.Errorf("failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // executeGraphQLQuery is a helper function to execute a GraphQL query

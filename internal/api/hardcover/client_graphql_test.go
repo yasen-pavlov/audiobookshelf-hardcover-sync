@@ -202,6 +202,7 @@ func TestGraphQLQuery_RetriesOn429ThenSucceeds(t *testing.T) {
 	client.logger = log
 	client.maxRetries = 3
 	client.retryDelay = 1 * time.Millisecond
+	client.throttleBaseDelay = 1 * time.Millisecond
 	client.rateLimiter = util.NewRateLimiter(time.Nanosecond, 100, 100, log)
 
 	var response struct {
@@ -232,6 +233,7 @@ func TestGraphQLQuery_FailsFastOn400(t *testing.T) {
 	client.logger = log
 	client.maxRetries = 3
 	client.retryDelay = 1 * time.Millisecond
+	client.throttleBaseDelay = 1 * time.Millisecond
 	client.rateLimiter = util.NewRateLimiter(time.Nanosecond, 100, 100, log)
 
 	var response struct {
@@ -244,4 +246,170 @@ func TestGraphQLQuery_FailsFastOn400(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, 1, int(atomic.LoadInt32(&attempts)))
 	assert.Contains(t, err.Error(), "non-retryable HTTP error")
+}
+
+// TestGraphQLQuery_429RetriesPastBaseLimitWithThrottledBody verifies that 429
+// responses are granted extra retry budget on top of c.maxRetries. With
+// maxRetries=3 the call would normally bail after 4 attempts; the throttled
+// body should extend the budget so a 5-times-then-200 server still succeeds.
+func TestGraphQLQuery_429RetriesPastBaseLimitWithThrottledBody(t *testing.T) {
+	logger.Setup(logger.Config{Level: "debug", Format: "json"})
+	log := logger.Get()
+
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) <= 5 {
+			// No Retry-After header — exercises the throttled-body branch
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"Throttled"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"books":[{"id":7}]}}`))
+	}))
+	defer server.Close()
+
+	client := CreateTestClient(server)
+	client.logger = log
+	client.maxRetries = 3
+	client.retryDelay = 1 * time.Millisecond
+	client.throttleBaseDelay = 1 * time.Millisecond
+	client.rateLimiter = util.NewRateLimiter(time.Nanosecond, 100, 100, log)
+
+	var response struct {
+		Books []struct {
+			ID int `json:"id"`
+		} `json:"books"`
+	}
+
+	err := client.GraphQLQuery(context.Background(), `query Retry429 { books { id } }`, nil, &response)
+	require.NoError(t, err)
+	assert.Equal(t, 6, int(atomic.LoadInt32(&attempts)))
+	require.Len(t, response.Books, 1)
+	assert.Equal(t, 7, response.Books[0].ID)
+}
+
+// TestGraphQLQuery_429BudgetExhausts verifies that we don't retry forever on
+// persistent 429s — once the 429-specific budget is spent the call fails.
+func TestGraphQLQuery_429BudgetExhausts(t *testing.T) {
+	logger.Setup(logger.Config{Level: "debug", Format: "json"})
+	log := logger.Get()
+
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"Throttled"}`))
+	}))
+	defer server.Close()
+
+	client := CreateTestClient(server)
+	client.logger = log
+	client.maxRetries = 3
+	client.retryDelay = 1 * time.Millisecond
+	client.throttleBaseDelay = 1 * time.Millisecond
+	client.rateLimiter = util.NewRateLimiter(time.Nanosecond, 100, 100, log)
+
+	var response struct{}
+	err := client.GraphQLQuery(context.Background(), `query Retry429Exhaust { books { id } }`, nil, &response)
+	require.Error(t, err)
+	// maxRetries(3) + 1 + max429(5) = 9 attempts total
+	assert.Equal(t, 9, int(atomic.LoadInt32(&attempts)))
+	assert.Contains(t, err.Error(), "429")
+}
+
+// TestGraphQLQuery_429HonoursRetryAfter verifies that the Retry-After header
+// is taken as a lower bound on the next inter-attempt delay.
+func TestGraphQLQuery_429HonoursRetryAfter(t *testing.T) {
+	logger.Setup(logger.Config{Level: "debug", Format: "json"})
+	log := logger.Get()
+
+	var (
+		attempts        int32
+		firstHitAt      time.Time
+		secondHitAt     time.Time
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch atomic.AddInt32(&attempts, 1) {
+		case 1:
+			firstHitAt = time.Now()
+			w.Header().Set("Retry-After", "1") // 1 second
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"Throttled"}`))
+		default:
+			secondHitAt = time.Now()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"books":[{"id":42}]}}`))
+		}
+	}))
+	defer server.Close()
+
+	client := CreateTestClient(server)
+	client.logger = log
+	client.maxRetries = 3
+	client.retryDelay = 1 * time.Millisecond
+	client.throttleBaseDelay = 1 * time.Millisecond
+	client.rateLimiter = util.NewRateLimiter(time.Nanosecond, 100, 100, log)
+
+	var response struct {
+		Books []struct {
+			ID int `json:"id"`
+		} `json:"books"`
+	}
+	err := client.GraphQLQuery(context.Background(), `query RetryAfterTest { books { id } }`, nil, &response)
+	require.NoError(t, err)
+	require.Len(t, response.Books, 1)
+
+	// Inter-attempt delay should be at least the Retry-After value.
+	require.False(t, firstHitAt.IsZero(), "server didn't record first hit")
+	require.False(t, secondHitAt.IsZero(), "server didn't record second hit")
+	gap := secondHitAt.Sub(firstHitAt)
+	assert.GreaterOrEqual(t, gap, 900*time.Millisecond,
+		"expected at least ~1s between attempts due to Retry-After, got %s", gap)
+}
+
+func TestIsThrottledBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"empty", "", false},
+		{"plain throttled", `{"error":"Throttled"}`, true},
+		{"capital throttled", `{"error":"THROTTLED"}`, true},
+		{"throttled in different key", `{"detail":"Throttled"}`, true},
+		{"unrelated 429 body", `{"error":"rate exceeded"}`, false},
+		{"unquoted throttled mention", `{"detail":"request was throttled by upstream"}`, false},
+		{"valid response", `{"data":{"books":[]}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isThrottledBody([]byte(tc.body))
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestComputeBackoffDelay(t *testing.T) {
+	base := 100 * time.Millisecond
+
+	// n < 1 returns base
+	assert.Equal(t, base, computeBackoffDelay(base, 0))
+	assert.Equal(t, base, computeBackoffDelay(base, -1))
+
+	// Exponential growth, within ±25% jitter band.
+	for n := 1; n <= 5; n++ {
+		expected := base * (1 << uint(n-1))
+		got := computeBackoffDelay(base, n)
+		minOK := time.Duration(float64(expected) * 0.75)
+		maxOK := time.Duration(float64(expected) * 1.25)
+		assert.GreaterOrEqual(t, got, minOK, "n=%d expected >= %s, got %s", n, minOK, got)
+		assert.LessOrEqual(t, got, maxOK, "n=%d expected <= %s, got %s", n, maxOK, got)
+	}
+
+	// Caps at MaxRetryDelay regardless of n.
+	assert.LessOrEqual(t, computeBackoffDelay(base, 30), MaxRetryDelay)
+
+	// Zero base produces zero delay.
+	assert.Equal(t, time.Duration(0), computeBackoffDelay(0, 5))
 }
