@@ -662,13 +662,14 @@ func (c *Client) executeGraphQLOperation(ctx context.Context, op graphqlOperatio
 				retryAfter, hasRetryAfter := parseRetryAfterDelay(resp.Header.Get("Retry-After"))
 				throttled := isThrottledBody(body)
 
-				// Tell the rate limiter so subsequent Wait()s slow down for the
-				// rest of this sync run, not just this single retry.
-				if hasRetryAfter {
-					c.rateLimiter.OnRateLimit(retryAfter)
-				} else {
-					c.rateLimiter.OnRateLimit(0)
-				}
+				// NOTE: deliberately NOT calling rateLimiter.OnRateLimit here.
+				// The existing limiter escalates aggressively (backoffFactor=8,
+				// applied to the *global* rate), so a single bad-luck 429
+				// pushes per-request pacing from 1.5s up to ~8s for the rest
+				// of the sync run. The exponential-with-jitter delay below
+				// already handles "wait longer before retrying this specific
+				// request"; we don't need to also penalise every subsequent
+				// request the sync makes.
 
 				// Compute the next inter-attempt delay. Prefer Retry-After when
 				// present (with a small floor to keep the math sane), otherwise
