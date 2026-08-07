@@ -98,9 +98,11 @@ func TestHTTPMiddleware(t *testing.T) {
 			// Reset the global logger for testing
 			ResetForTesting()
 
-			// Configure the logger with JSON format for easier parsing
+			// Configure the logger with JSON format for easier parsing.
+			// Debug level: the request-logging middleware logs at Debug so
+			// per-request lines stay out of production info-level output.
 			Setup(Config{
-				Level:      "info",
+				Level:      "debug",
 				Format:     FormatJSON,
 				Output:     &buf,
 				TimeFormat: "", // No timestamp in tests for easier assertions
