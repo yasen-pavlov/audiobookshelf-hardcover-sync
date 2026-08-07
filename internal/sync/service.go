@@ -509,7 +509,7 @@ func (s *Service) findOrCreateUserBookID(ctx context.Context, editionID, status 
 				logCtx.Info("[DRY-RUN] Would relink user_book + re-align reads to requested edition", nil)
 			}
 		} else {
-			logCtx.Info("Found existing user book for same book on requested edition, using it", map[string]interface{}{
+			logCtx.Debug("Found existing user book for same book on requested edition, using it", map[string]interface{}{
 				"book_id":              bookID,
 				"existing_user_book_id": existingUserBookID,
 				"edition_id":           editionID,
@@ -1978,7 +1978,7 @@ func (s *Service) HandleFinishedBook(ctx context.Context, book models.Audiobooks
 	}()
 
 	// First, check the current status of the book and update to FINISHED if needed
-	log.Info("Checking current book status", map[string]interface{}{
+	log.Debug("Checking current book status", map[string]interface{}{
 		"user_book_id": userBookID,
 	})
 
@@ -2048,7 +2048,7 @@ func (s *Service) HandleFinishedBook(ctx context.Context, book models.Audiobooks
 				log.Info("Successfully updated book status to FINISHED", nil)
 			}
 		} else {
-			log.Info("Book already has FINISHED status, skipping status update", map[string]interface{}{
+			log.Debug("Book already has FINISHED status, skipping status update", map[string]interface{}{
 				"user_book_id":   userBookID,
 				"book_status_id": userBook.BookStatusID,
 			})
@@ -2073,7 +2073,7 @@ func (s *Service) HandleFinishedBook(ctx context.Context, book models.Audiobooks
 	}
 
 	// Look for the most recent unfinished read and check for existing finished reads
-	log.Info("Fetching read statuses from Hardcover", map[string]interface{}{
+	log.Debug("Fetching read statuses from Hardcover", map[string]interface{}{
 		"user_book_id": userBookID,
 	})
 
@@ -2277,7 +2277,7 @@ func (s *Service) HandleFinishedBook(ctx context.Context, book models.Audiobooks
 				"read_id": latestUnfinishedRead.ID,
 			})
 		} else {
-			log.Info("Book already has a read status, not creating a new one", map[string]interface{}{
+			log.Debug("Book already has a read status, not creating a new one", map[string]interface{}{
 				"book_id": book.ID,
 				"title":   book.Media.Metadata.Title,
 			})
@@ -4007,7 +4007,7 @@ func (s *Service) findBookInHardcover(ctx context.Context, book models.Audiobook
 					hcBook.UserBookID = strconv.FormatInt(userBookID, 10)
 				}
 
-				s.log.Info("Using cached book by ASIN", map[string]interface{}{
+				s.log.Debug("Using cached book by ASIN", map[string]interface{}{
 					"book_id":      hcBook.ID,
 					"edition_id":   hcBook.EditionID,
 					"user_book_id": hcBook.UserBookID,

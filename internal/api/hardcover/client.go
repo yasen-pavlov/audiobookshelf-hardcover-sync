@@ -371,7 +371,7 @@ type loggingRoundTripper struct {
 // RoundTrip implements the http.RoundTripper interface
 func (l loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Log the request with basic info
-	l.logger.Info("Sending request", map[string]interface{}{
+	l.logger.Debug("Sending request", map[string]interface{}{
 		"method": req.Method,
 		"url":    req.URL.String(),
 	})
@@ -410,7 +410,7 @@ func (l loggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	if resp.StatusCode >= 400 {
 		l.logger.Error("Received error response", logFields)
 	} else {
-		l.logger.Info("Received response", logFields)
+		l.logger.Debug("Received response", logFields)
 	}
 
 	// Create a new response with the body since we've already read it
