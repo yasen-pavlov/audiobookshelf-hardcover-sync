@@ -339,6 +339,11 @@ func TestNeedsSync(t *testing.T) {
 			s := NewState()
 			if tc.storedStatus != "" {
 				s.UpdateBookWithUserBookID(bookID, tc.storedProgress, tc.storedStatus, "")
+				// v3.5.0 semantics: stored state without progress-seconds
+				// data always re-syncs (HasProgressSeconds=false → true).
+				// These cases model a previously COMPLETE sync, so mark
+				// the fixture accordingly.
+				s.SetHasProgressSeconds(bookID)
 			}
 
 			got := s.NeedsSync(bookID, tc.curProgress, tc.curStatus, threshold)
