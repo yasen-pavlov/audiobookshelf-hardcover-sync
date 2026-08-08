@@ -1960,7 +1960,7 @@ func (c *Client) searchBooksWithLimit(ctx context.Context, query string, limit i
 		resultIDs = append(resultIDs, fmt.Sprintf("%s (%s)", r.ID, r.Title))
 	}
 
-	log.Info("Successfully searched for books", map[string]interface{}{
+	log.Debug("Successfully searched for books", map[string]interface{}{
 		"count":   len(searchResults),
 		"results": resultIDs,
 	})
@@ -2516,14 +2516,14 @@ func (c *Client) UpdateUserBookRead(ctx context.Context, input UpdateUserBookRea
 	// The API sometimes returns success with user_book_read: null
 	// In this case, we'll assume the update was successful
 	if result.UpdateUserBookRead.UserBookRead == nil {
-		c.logger.Info("Successfully updated user book read (no user_book_read in response but no error)", map[string]interface{}{
+		c.logger.Debug("Successfully updated user book read (no user_book_read in response but no error)", map[string]interface{}{
 			"id": input.ID,
 		})
 		return true, nil
 	}
 
 	updatedID := result.UpdateUserBookRead.UserBookRead.ID
-	c.logger.Info("Successfully updated user book read entry", map[string]interface{}{
+	c.logger.Debug("Successfully updated user book read entry", map[string]interface{}{
 		"updated_id": updatedID,
 	})
 
@@ -3674,7 +3674,7 @@ func (c *Client) CreateUserBook(ctx context.Context, editionID, status string) (
 
 	userBookID := strconv.Itoa(result.InsertUserBook.UserBook.ID)
 
-	c.logger.Info("Successfully created user book", map[string]interface{}{
+	c.logger.Debug("Successfully created user book", map[string]interface{}{
 		"userBookID":    result.InsertUserBook.UserBook.ID,
 		"statusID":      result.InsertUserBook.UserBook.StatusID,
 		"editionID":     editionIDInt,
@@ -4166,7 +4166,7 @@ func (c *Client) UpdateUserBook(ctx context.Context, input UpdateUserBookInput) 
 		return fmt.Errorf("update_user_book error: %s", *result.UpdateUserBook.Error)
 	}
 
-	log.Info("Successfully updated user book", map[string]interface{}{
+	log.Debug("Successfully updated user book", map[string]interface{}{
 		"id": result.UpdateUserBook.ID,
 	})
 

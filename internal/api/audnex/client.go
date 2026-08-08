@@ -215,7 +215,7 @@ func (c *Client) GetBookByASIN(ctx context.Context, asin, region string) (*Book,
 
 			// Log success after retries if this wasn't the first attempt
 			if attempt > 0 {
-				c.logger.Info("Successfully retrieved book after retries", map[string]interface{}{
+				c.logger.Debug("Successfully retrieved book after retries", map[string]interface{}{
 					"asin":     asin,
 					"attempts": attempt + 1,
 				})

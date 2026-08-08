@@ -593,7 +593,7 @@ func (r *RateLimiter) WithRateLimitHeaders(resp *http.Response) {
 			now := time.Now()
 			if resetTime.After(now) {
 				resetDuration := resetTime.Sub(now)
-				r.logger.Info("Rate limit will reset, scheduling next request", map[string]interface{}{
+				r.logger.Debug("Rate limit will reset, scheduling next request", map[string]interface{}{
 					"component":  "rate_limiter",
 					"reset_time": resetTime.Format(time.RFC3339),
 					"reset_in":   resetDuration.String(),

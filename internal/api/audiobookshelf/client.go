@@ -182,7 +182,7 @@ func (c *Client) GetLibraryItems(ctx context.Context, libraryID string) ([]model
 	logFile := filepath.Join(logDir, "audiobookshelf_response.json")
 
 	// Save the response to file
-	log.Info("Saving API response to file", map[string]interface{}{
+	log.Debug("Saving API response to file", map[string]interface{}{
 		"path": logFile,
 	})
 	if err := os.WriteFile(logFile, body, 0644); err != nil {
@@ -335,7 +335,7 @@ func (c *Client) GetLibraryItems(ctx context.Context, libraryID string) ([]model
 		Results: books,
 	}
 
-	log.Info("Successfully fetched library items", map[string]interface{}{
+	log.Debug("Successfully fetched library items", map[string]interface{}{
 		"count": len(result.Results),
 	})
 
@@ -399,7 +399,7 @@ func (c *Client) GetUserProgress(ctx context.Context) (*models.AudiobookshelfUse
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	log.Info("Successfully fetched user progress in GetUserProgress", map[string]interface{}{
+	log.Debug("Successfully fetched user progress in GetUserProgress", map[string]interface{}{
 		"media_progress_count":     len(progress.MediaProgress),
 		"listening_sessions_count": len(progress.ListeningSessions),
 	})
@@ -469,7 +469,7 @@ func (c *Client) GetListeningSessions(ctx context.Context, since time.Time) ([]m
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	log.Info("Successfully fetched listening sessions", map[string]interface{}{
+	log.Debug("Successfully fetched listening sessions", map[string]interface{}{
 		"count": len(sessions),
 	})
 

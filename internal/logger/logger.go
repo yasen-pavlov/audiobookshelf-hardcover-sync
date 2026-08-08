@@ -184,7 +184,7 @@ func ForceSetup(cfg Config) {
 	setupLogger(cfg)
 	// Log a re-initialization message with the new format
 	if globalLogger != nil {
-		globalLogger.Info("Logger re-initialized with new configuration", map[string]interface{}{
+		globalLogger.Debug("Logger re-initialized with new configuration", map[string]interface{}{
 			"format":      string(cfg.Format),
 			"time_format": cfg.TimeFormat,
 		})
@@ -245,7 +245,7 @@ func setupLogger(cfg Config) {
 
 	// Log the logger setup with the configured level
 	// Note: This message will use the newly configured format
-	globalLogger.Info("Logger initialized", map[string]interface{}{
+	globalLogger.Debug("Logger initialized", map[string]interface{}{
 		"format":      string(cfg.Format),
 		"time_format": cfg.TimeFormat,
 	})
